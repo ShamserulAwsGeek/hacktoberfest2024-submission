@@ -1,0 +1,312 @@
+#AWS LAMBDA CREATION: 
+
+resource "aws_lambda_function" "this" {
+  architectures = [var.architecture]
+  function_name = var.function_name
+  description   = var.description
+  role          = var.role
+  handler       = var.handler
+  runtime       = var.runtime
+  timeout       = var.timeout
+  memory_size   = var.memory_size
+
+  # using local file for lambda
+  filename         = var.filename != "" ? var.filename : null
+  source_code_hash = var.filename != "" && var.filename != null ? filemd5(var.filename) : null
+
+  # using s3 bucket for lambda
+  s3_bucket         = var.s3_bucket != "" ? var.s3_bucket : null
+  s3_key            = var.s3_key
+  s3_object_version = var.s3_object_version
+
+  dynamic "logging_config" {
+    for_each = var.log_format != null ? [1] : []
+    content {
+      log_group        = var.log_group_name
+      log_format       = var.log_format
+      system_log_level = var.system_log_level
+    }
+  }
+
+  environment {
+    variables = var.environment_variables
+  }
+
+  tags = var.tags
+
+}
+
+resource "aws_lambda_function_url" "this" {
+  count              = var.create_function_url ? 1 : 0
+  function_name      = aws_lambda_function.this.function_name
+  authorization_type = var.create_function_url && var.authorization_type == null ? "NONE" : var.authorization_type
+
+  dynamic "cors" {
+    for_each = var.cors
+    content {
+      allow_origins     = cors.value.allow_origins
+      allow_methods     = cors.value.allow_methods
+      allow_headers     = cors.value.allow_headers
+      max_age           = cors.value.max_age
+      allow_credentials = cors.value.allow_credentials
+    }
+  }
+}
+
+
+
+resource "aws_lambda_event_source_mapping" "this" {
+  count = length(var.event_source_mapping)
+  # common for all event sources
+  event_source_arn  = var.event_source_mapping[count.index].event_source_arn
+  function_name     = aws_lambda_function.this.arn
+  starting_position = var.event_source_mapping[count.index].starting_position
+  batch_size        = var.event_source_mapping[count.index].batch_size
+  enabled           = var.event_source_mapping[count.index].enabled
+
+  # for MSK
+  topics = [var.event_source_mapping[count.index].msk_topic]
+
+  # for MQ
+  queues = [var.event_source_mapping[count.index].mq_queue]
+
+  # for kinesis and dynamodb
+  bisect_batch_on_function_error = var.event_source_mapping[count.index].bisect_batch_on_function_error
+  maximum_record_age_in_seconds  = var.event_source_mapping[count.index].maximum_record_age_in_seconds
+  maximum_retry_attempts         = var.event_source_mapping[count.index].maximum_retry_attempts
+  parallelization_factor         = var.event_source_mapping[count.index].parallelization_factor
+
+  # for kinsesis dynamodb and kafka
+  destination_config {
+    on_failure {
+      destination_arn = var.event_source_mapping[count.index].on_failure_destination_arn
+    }
+  }
+  maximum_batching_window_in_seconds = var.event_source_mapping[count.index].maximum_batching_window_in_seconds
+
+  # for SQS,kinesis and dynamodb
+  filter_criteria {
+    filter {
+      pattern = var.event_source_mapping[count.index].filter_pattern
+    }
+  }
+
+  # for dynamodb
+  document_db_event_source_config {
+    collection_name = var.event_source_mapping[count.index].collection_name
+    database_name   = var.event_source_mapping[count.index].database_name
+    full_document   = var.event_source_mapping[count.index].full_document
+  }
+  # for SQS 
+  scaling_config {
+    maximum_concurrency = var.event_source_mapping[count.index].maximum_concurrency
+  }
+}
+
+# in case of asyncronous invocation onfigure permission for lambda to invoke the destination
+# allowed destination for asyncronous invocation are SQS, SNS and Lambda function, event bridge
+resource "aws_lambda_permission" "this" {
+  count         = length(var.event_source_mapping)
+  statement_id  = var.event_source_mapping[count.index].principal + count.index
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.this.function_name
+  principal     = var.event_source_mapping[count.index].principal
+  source_arn    = var.event_source_arn
+}
+
+
+#OUTPUT IN JSON FORMAT: 
+
+{
+  "output": {
+    "function_arn": {
+      "description": "The value of the function_arn output",
+      "sensitive": false,
+      "value": "${aws_lambda_function.this.arn}"
+    },
+    "function_name": {
+      "description": "The value of the function_name output",
+      "sensitive": false,
+      "value": "${aws_lambda_function.this.function_name}"
+    },
+    "function_url": {
+      "description": "The value of the function_url output",
+      "sensitive": false,
+      "value": "${var.create_function_url ? aws_lambda_function_url.this[0].function_url : null}"
+    },
+    "invoke_arn": {
+      "description": "The value of the invoke_arn output",
+      "sensitive": false,
+      "value": "${aws_lambda_function.this.invoke_arn}"
+    }
+  }
+}
+
+
+#VARIABLES IN JSON FORMAT: 
+
+{
+    "variable": {
+        "architecture": [
+            {
+                "default": "x86_64",
+                "description": "The architectures supported by the function.",
+                "nullable": true,
+                "type": "string"
+            }
+        ],
+        "authorization_type": [
+            {
+                "default": "NONE",
+                "description": "The authorization type for the function URL.",
+                "nullable": true,
+                "type": "string"
+            }
+        ],
+        "cors":[
+            {
+                "description": "The CORS configuration for the function.",
+                "nullable": true,
+                "type": "list(object({ allow_credentials: bool, allow_headers: list(string), allow_methods: list(string), allow_origins: list(string), max_age: number }))"
+            }
+        ],
+        "create_function_url": [
+            {
+                "default": false,
+                "description": "Whether to create a URL for the Lambda Function.",
+                "nullable": true,
+                "type": "bool"
+            }
+        ],
+        "description": [
+            {
+                "description": "Description of what your Lambda Function does.",
+                "nullable": true,
+                "type": "string"
+            }
+        ],
+        "environment_variables": [
+            {
+                "description": "A map that defines environment variables for the Lambda Function.",
+                "nullable": true,
+                "type": "map(string)"
+            }
+        ],
+        "event_source_arn": [
+            {
+                "description": "The ARN of the event source.",
+                "nullable": true,
+                "type": "string"
+            }
+        ],
+        "filename": [
+            {
+                "description": "The path to the function's deployment package(zip) within the local filesystem",
+                "nullable": true,
+                "type": "string"
+            }
+        ],
+        "function_name": [
+            {
+                "description": "Unique name for your Lambda Function.",
+                "nullable": false,
+                "type": "string"
+            }
+        ],
+        "handler": [
+            {
+                "default": "main.lambda_handler",
+                "description": "The entry point for the Lambda Function.",
+                "nullable": false,
+                "type": "string"
+            }
+        ],
+        "log_format": [
+            {
+                "description": "The format of the logs in the log group.",
+                "nullable": true,
+                "type": "string"
+            }
+        ],
+        "log_group_name": [
+            {
+                "description": "The name of the CloudWatch log group to send logs to.",
+                "nullable": true,
+                "type": "string"
+            }
+        ],
+        "role": [
+            {
+                "description": "The ARN of the IAM role that the Lambda Function assumes when it executes your function to access any other AWS services.",
+                "nullable": false,
+                "type": "string"
+            }
+        ],
+        "runtime": [
+            {
+                "description": "runtime to use when running the Lambda Function.",
+                "nullable": false,
+                "type": "string",
+                "default": "python3.8"
+            }
+        ],
+        "timeout": [
+            {
+                "description": "The amount of time your Lambda Function has to run in seconds.",
+                "default": 3,
+                "nullable": true,
+                "type": "number"
+            }
+        ],
+        "memory_size": [
+            {
+                "description": "The amount of memory that your Lambda Function has access to in MB.",
+                "default": 128,
+                "nullable": true,
+                "type": "number"
+            }
+        ],
+        "s3_bucket": [
+            {
+                "description": "The S3 bucket location that contains the function's deployment package.",
+                "nullable": true,
+                "type": "string"
+            }
+        ],
+        "s3_key": [
+            {
+                "description": "The S3 key of an object containing the function's deployment package.",
+                "nullable": true,
+                "type": "string"
+            }
+        ],
+        "s3_object_version": [
+            {
+                "description": "The object version of the function's deployment package.",
+                "nullable": true,
+                "type": "string"
+            }
+        ],
+        "system_log_level": [
+            {
+                "description": "The log level for the Lambda Function.",
+                "nullable": true,
+                "type": "string"
+            }
+        ],
+        "event_source_mapping":[
+            {
+                "description": "The event source mapping configuration.",
+                "nullable": true,
+                "type": "list(object({ event_source_arn: string, starting_position: string,batch_size:number,enabled:bool,msk_topic:string,mq_queue:string,bisect_batch_on_function_error:bool, maximum_record_age_in_seconds:number,maximum_retry_attempts:number,parallelization_factor:number,on_failure_destination_arn:string,maximum_batching_window_in_seconds:number,filter_pattern:string,collection_name:string,database_name:string,full_document:string,maximum_concurrency:number,principal:string }))"
+            }
+        ],
+        "tags":[
+            {
+                "description": "A mapping of tags to assign to the resource.",
+                "nullable": true,
+                "type": "map(string)"
+            }
+        ]
+    }
+}
